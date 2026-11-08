@@ -13,6 +13,8 @@ from urllib.parse import urlencode
 import webview
 import zmq
 
+from .branding import icon_path, set_windows_app_identity
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
@@ -154,9 +156,12 @@ def process_commands():
 threading.Thread(target=listen, daemon=True).start()
 threading.Thread(target=process_commands, daemon=True).start()
 
+# Set the Windows application identity before constructing any native windows.
+set_windows_app_identity()
+
 # Hidden root keeps pywebview running when users close all visible windows.
 root = webview.create_window('PunchCard Host', html='<html></html>', hidden=True)
 windows['__root__'] = root
 create_window('widget')
 webview.settings['ALLOW_DOWNLOADS'] = True
-webview.start(debug=False)
+webview.start(debug=False, icon=str(icon_path()))
