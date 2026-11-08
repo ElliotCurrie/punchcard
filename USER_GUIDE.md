@@ -21,7 +21,6 @@ PunchCard also runs in the Windows **system tray** (the notification area by the
 **Permissions needed**
 
 - Jira API token: `read:jira-work`
-- Jira account: **Browse Projects** (plus access to any restricted issues you need)
 
 Use the **Refresh** control in the ticket picker whenever you want to fetch the latest Jira tickets. PunchCard remembers your connection details, so you don't need to re-enter the token every time you open it.
 
@@ -69,19 +68,18 @@ The export includes sessions overlapping your chosen range, with their full reco
 
 ## 6. Optional: synchronise directly to Tempo
 
-Direct Tempo synchronisation is **off by default**. You can continue using PunchCard purely for tracking and CSV export if you prefer.
+Tempo synchronisation is **enabled automatically when you save a Tempo connection**, once PunchCard has identified your Jira account. You can turn it off at any time from Timesheet; CSV export works independently.
 
 To enable it:
 
 1. Create a Tempo API token in Tempo's API integration settings.
 2. Open PunchCard **Settings** and expand **Tempo synchronisation**.
 3. Paste the **Tempo API token**, choose its **expiry date**, and select **Save**. Usually you can leave the API endpoint at its default.
-4. Open **Timesheet** and switch on **Tempo sync** beside the daily total.
+4. Synchronisation turns on automatically once your Jira account has been identified. You can turn it off or back on using **Tempo sync** in Timesheet.
 
 **Permissions needed**
 
 - Tempo API token: **Worklogs → Manage**
-- Jira account: **Browse Projects**, **Work on Issues**, **Edit Own Worklogs**, **Delete Own Worklogs**
 
 When enabled, PunchCard attempts to synchronise eligible completed sessions automatically. Editing a previously synchronised session can update the corresponding Tempo worklog; deleting one can remove its linked worklog. You don't need to trigger synchronisation manually.
 
@@ -113,7 +111,7 @@ PunchCard stores sessions and settings locally. API tokens are encrypted using W
 |---|---|
 | **No Jira tickets appear** | Check the Jira connection, token expiry and permissions in Settings, then use **Refresh** in Choose ticket. Only unfinished assigned issues are selectable. |
 | **Nothing is appearing in Tempo** | Confirm Tempo sync is enabled in Timesheet, the Tempo token has the required permission, and the session is finished and linked to a Jira ticket. Check its Timesheet status. |
-| **Tempo sync cannot be enabled** | Save a Tempo token and refresh Jira tickets, then try the switch again. |
+| **Tempo sync cannot be enabled** | Save a Tempo token, then refresh Jira tickets so PunchCard can identify your Jira account. |
 | **Teams call wasn't detected correctly** | Check and edit the recorded session in Timesheet. Teams detection relies on its desktop accessibility controls. |
 | **The PunchCard window disappeared** | Find the PunchCard icon in the Windows system tray and reopen it. |
 | **A token expiry warning appears** | Renew the relevant API token and update it in Settings. |
