@@ -1,7 +1,7 @@
-"""Windows DPAPI encrypted credentials stored *inside* the PunchCard project.
+"""Windows DPAPI encrypted credentials stored in PunchCard user data.
 
-No use of Windows Credential Manager. The encrypted file itself is deleted when
-project/data is deleted. DPAPI protects secrets for the current Windows user;
+No use of Windows Credential Manager. The encrypted file lives under
+%LOCALAPPDATA%/PunchCard/data on Windows. DPAPI protects secrets for the current Windows user;
 copying credentials.dpapi to a different Windows account is not supported.
 """
 import json
@@ -29,7 +29,7 @@ def _unprotect(ciphertext: bytes) -> bytes:
     try:
         return win32crypt.CryptUnprotectData(ciphertext, None, None, None, 0)[1]
     except Exception as exc:
-        raise RuntimeError('Cannot decrypt project/data/credentials.dpapi for this Windows user. '
+        raise RuntimeError('Cannot decrypt PunchCard credentials for this Windows user. '
                            'Use the same Windows account or remove the file and re-enter the tokens.') from exc
 
 
