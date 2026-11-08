@@ -12,7 +12,7 @@ The goal is simple: **spend less time recording what you worked on and more time
 - **Teams call detection** — automatically record detected calls as separate sessions and resume an interrupted ticket when appropriate.
 - **Daily timesheet** — review recorded sessions, correct times or ticket assignments, and remove entries you don't want to keep.
 - **Date-range CSV export** — export sessions between two chosen dates without connecting to Tempo.
-- **Optional Tempo synchronisation** — send eligible completed sessions as worklogs, with updates and deletions handled for linked entries. Automatic synchronisation is off by default.
+- **Optional Tempo synchronisation** — send eligible completed sessions as worklogs, with updates and deletions handled for linked entries. Synchronisation is enabled automatically when a Tempo connection is configured and your Jira account has been identified; it can be disabled from Timesheet.
 - **Windows desktop integration** — a compact draggable window and system-tray controls; tracking can continue while the widget is hidden.
 
 ## Getting started
@@ -39,14 +39,14 @@ For a packaged Windows build, if one is published, extract it and run `PunchCard
 2. Enter your Jira Cloud URL, account email and API token, along with the token expiry date.
 3. Select **Save**, then use **Choose ticket** in the widget to start tracking.
 
-**Jira permissions:** `read:jira-work` (API token) and **Browse Projects** (Jira account). You must also be able to access the relevant issues.
+**Jira API token permissions:** `read:jira-work`
 
 ### Optional: connect Tempo
 
 1. In **Settings → Tempo synchronisation**, enter your Tempo API token and its expiry date, then select **Save**.
-2. Open **Timesheet** and enable **Tempo sync**.
+2. Synchronisation enables automatically after your Jira account has been identified. Use the **Tempo sync** switch in Timesheet to turn it off or on.
 
-**Tempo permissions:** **Worklogs → Manage** (API token). Your Jira account also needs **Browse Projects**, **Work on Issues**, **Edit Own Worklogs** and **Delete Own Worklogs** for the relevant projects.
+**Tempo API token permissions:** **Worklogs → Manage**.
 
 PunchCard records sessions locally whether or not Tempo sync is enabled. Sessions without a Jira ticket, or too short to form a whole-minute Tempo worklog, remain local until eligible.
 
@@ -63,7 +63,7 @@ For everyday use, settings and troubleshooting, see the **[User Guide](USER_GUID
 
 ## Privacy and limitations
 
-- Sessions, preferences and synchronisation records are stored locally in SQLite. API tokens are encrypted with Windows user-account protection (DPAPI).
+- Sessions, preferences and synchronisation records are stored under `%LOCALAPPDATA%\PunchCard\data` for both source and executable runs. API tokens are encrypted with Windows user-account protection (DPAPI).
 - PunchCard does **not** record Teams audio, video or transcripts. Call detection relies on accessibility information exposed by the desktop app and may occasionally miss or misidentify calls.
 - CSV exports contain recorded activity data. They are general-purpose exports, not a guaranteed match for a particular Tempo import format.
 - The current application is Windows-focused and is not an official Atlassian, Tempo or Microsoft product.
