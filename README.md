@@ -46,7 +46,7 @@ For a packaged Windows build, if one is published, extract it and run `PunchCard
 1. In **Settings → Tempo synchronisation**, enter your Tempo API token and its expiry date, then select **Save**.
 2. Synchronisation enables automatically after your Jira account has been identified. Use the **Tempo sync** switch in Timesheet to turn it off or on.
 
-**Tempo API token permissions:** **Worklogs → Manage**.
+**Tempo API token permissions:** **Worklogs → Manage**
 
 PunchCard records sessions locally whether or not Tempo sync is enabled. Sessions without a Jira ticket, or too short to form a whole-minute Tempo worklog, remain local until eligible.
 
@@ -63,7 +63,7 @@ For everyday use, settings and troubleshooting, see the **[User Guide](USER_GUID
 
 ## Privacy and limitations
 
-- Sessions, preferences and synchronisation records are stored under `%LOCALAPPDATA%\PunchCard\data` for both source and executable runs. API tokens are encrypted with Windows user-account protection (DPAPI).
+- Sessions, preferences and synchronisation records are stored under `%LOCALAPPDATA%\PunchCard\data` for both source and executable runs. Jira and Tempo API tokens are stored separately in Windows Credential Manager.
 - PunchCard does **not** record Teams audio, video or transcripts. Call detection relies on accessibility information exposed by the desktop app and may occasionally miss or misidentify calls.
 - CSV exports contain recorded activity data. They are general-purpose exports, not a guaranteed match for a particular Tempo import format.
 - The current application is Windows-focused and is not an official Atlassian, Tempo or Microsoft product.
