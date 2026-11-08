@@ -1,87 +1,72 @@
-"""Windows DPAPI encrypted credentials stored in PunchCard user data.
+"""Store PunchCard API tokens as Windows Credential Manager generic credentials.
 
-No use of Windows Credential Manager. The encrypted file lives under
-%LOCALAPPDATA%/PunchCard/data on Windows. DPAPI protects secrets for the current Windows user;
-copying credentials.dpapi to a different Windows account is not supported.
+Each Jira account and the Tempo API token has its own Windows credential.
+No tokens are written to PunchCard files. A credential belongs to the current
+Windows user; users can inspect or remove it in Windows Credential Manager.
 """
-import json
-import os
-import tempfile
+
 import threading
-from pathlib import Path
-
-_LOCK = threading.RLock()
-
-
-def _protect(plaintext: bytes) -> bytes:
-    try:
-        import win32crypt
-    except ImportError as exc:
-        raise RuntimeError('PunchCard credential encryption requires Windows and pywin32') from exc
-    return win32crypt.CryptProtectData(plaintext, 'PunchCard API credentials', None, None, None, 0)
-
-
-def _unprotect(ciphertext: bytes) -> bytes:
-    try:
-        import win32crypt
-    except ImportError as exc:
-        raise RuntimeError('PunchCard credential decryption requires Windows and pywin32') from exc
-    try:
-        return win32crypt.CryptUnprotectData(ciphertext, None, None, None, 0)[1]
-    except Exception as exc:
-        raise RuntimeError('Cannot decrypt PunchCard credentials for this Windows user. '
-                           'Use the same Windows account or remove the file and re-enter the tokens.') from exc
 
 
 class CredentialVault:
-    def __init__(self, path: Path):
-        self.path = Path(path)
+    """Thin adapter over Windows Credential Manager for API tokens."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
 
     @staticmethod
-    def _key(service: str, account: str) -> str:
-        return f'{service}\u0000{account}'
+    def _target(service: str, account: str) -> str:
+        if not service or not account:
+            raise ValueError('Credential service and account are required')
+        return f'{service}:{account}'
 
-    def _read(self) -> dict[str, str]:
-        if not self.path.exists():
-            return {}
-        data = json.loads(_unprotect(self.path.read_bytes()).decode('utf-8'))
-        if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('secrets'), dict):
-            raise RuntimeError('Unrecognised PunchCard credential file format')
-        if not all(isinstance(k, str) and isinstance(v, str) for k, v in data['secrets'].items()):
-            raise RuntimeError('Invalid PunchCard credential records')
-        return data['secrets']
+    @staticmethod
+    def _backend():
+        try:
+            import win32cred
+        except ImportError as exc:
+            raise RuntimeError('PunchCard credential storage requires Windows and pywin32') from exc
+        return win32cred
 
     def get_password(self, service: str, account: str) -> str | None:
-        with _LOCK:
-            return self._read().get(self._key(service, account))
+        cred = self._backend()
+        target = self._target(service, account)
+        with self._lock:
+            try:
+                stored = cred.CredRead(target, cred.CRED_TYPE_GENERIC)
+            except Exception as exc:
+                # Windows returns ERROR_NOT_FOUND (1168) when no credential exists.
+                # Authentication or storage failures must not be mistaken for missing tokens.
+                if getattr(exc, 'winerror', None) == 1168:
+                    return None
+                raise
+        if stored is None:
+            return None
+        blob = stored['CredentialBlob']
+        # pywin32 returns raw UTF-16LE bytes on Windows; some backends return str.
+        return blob.decode('utf-16-le') if isinstance(blob, bytes) else blob
 
     def set_password(self, service: str, account: str, token: str) -> None:
         if not token:
             raise ValueError('Cannot store an empty token')
-        with _LOCK:
-            secrets = self._read()
-            secrets[self._key(service, account)] = token
-            self._write(secrets)
+        cred = self._backend()
+        target = self._target(service, account)
+        with self._lock:
+            cred.CredWrite({
+                'Type': cred.CRED_TYPE_GENERIC,
+                'TargetName': target,
+                'UserName': account,
+                'CredentialBlob': token,
+                'Persist': cred.CRED_PERSIST_LOCAL_MACHINE,
+                'Comment': 'PunchCard API token',
+            }, 0)
 
     def delete_password(self, service: str, account: str) -> None:
-        with _LOCK:
-            secrets = self._read()
-            if secrets.pop(self._key(service, account), None) is not None:
-                self._write(secrets)
-
-    def _write(self, secrets: dict[str, str]):
-        plaintext = json.dumps({'version': 1, 'secrets': secrets}, separators=(',', ':')).encode('utf-8')
-        ciphertext = _protect(plaintext)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(mode='wb', prefix='.credentials-', suffix='.tmp',
-                                             dir=self.path.parent, delete=False) as tmp:
-                temp_path = Path(tmp.name)
-                tmp.write(ciphertext)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            os.replace(temp_path, self.path)
-        finally:
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
+        cred = self._backend()
+        target = self._target(service, account)
+        with self._lock:
+            try:
+                cred.CredDelete(target, cred.CRED_TYPE_GENERIC)
+            except Exception as exc:
+                if getattr(exc, 'winerror', None) != 1168:
+                    raise
