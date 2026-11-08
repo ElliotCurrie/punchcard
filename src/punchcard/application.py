@@ -69,6 +69,7 @@ class Application:
         # The relationships between objects are all declared here.
         self.tracker.on_change.subscribe(self.widget.invalidate)
         self.tracker.on_session_completed.subscribe(self._session_completed)
+        self.jira.on_change.subscribe(self.settings.enable_tempo_sync_if_ready)
         self.jira.on_change.subscribe(self.widget.invalidate)
         self.jira.on_change.subscribe(self.ticket_picker.invalidate)
         self.settings.on_change.subscribe(self.widget.invalidate)
