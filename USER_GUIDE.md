@@ -103,7 +103,7 @@ Unassigned Teams sessions remain local until you associate them with a Jira tick
 
 Settings shows the expiry date you entered for each token. PunchCard warns you when a token is close to expiring. If you renew a token, enter the replacement token and its new expiry date in Settings, then select **Save**.
 
-PunchCard stores sessions and settings locally. API tokens are encrypted using Windows user-account protection. Do not share your application data or credentials with others. When moving PunchCard to another Windows account or computer, you may need to enter your tokens again.
+PunchCard stores sessions and settings locally. Jira and Tempo API tokens are stored in Windows Credential Manager for your Windows user account. If you move to another computer or Windows account, you will need to enter your tokens again.
 
 ## 8. Troubleshooting
 
