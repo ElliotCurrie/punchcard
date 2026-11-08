@@ -19,21 +19,24 @@ from .events import EventHook
 from .timestamps import utcnow
 
 
+
 KEYRING_SERVICE = 'PunchCard Jira'
 TEMPO_SERVICE = 'PunchCard Tempo'
 
 
 def _default_project_directory() -> Path:
-    """Keep development files local, but store executable data in AppData."""
-    if getattr(sys, 'frozen', False):
-        local_app_data = os.environ.get('LOCALAPPDATA')
-        return (Path(local_app_data) if local_app_data else Path.home() / 'AppData' / 'Local') / 'PunchCard'
-    return Path(__file__).resolve().parents[2]
+    """Use the same per-user data directory for uv and frozen builds."""
+    local_app_data = os.environ.get('LOCALAPPDATA')
+    if local_app_data:
+        return Path(local_app_data) / 'PunchCard'
+    if os.name == 'nt' or getattr(sys, 'frozen', False):
+        return Path.home() / 'AppData' / 'Local' / 'PunchCard'
+    return Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'PunchCard'
 
 
 @dataclass(frozen=True)
 class ProjectPaths:
-    """Locate writable user data separately from bundled application resources."""
+    """Locate per-user data and separately locate bundled/source resources."""
     project_dir: Path = field(default_factory=_default_project_directory)
 
     @property
@@ -56,7 +59,8 @@ class ProjectPaths:
     def user_guide(self) -> Path:
         if getattr(sys, 'frozen', False):
             return Path(sys._MEIPASS) / 'USER_GUIDE.md'
-        return self.project_dir / 'USER_GUIDE.md'
+        # The guide is a source resource, not writable application data.
+        return Path(__file__).resolve().parents[2] / 'USER_GUIDE.md'
 
 
 class Settings:
@@ -147,11 +151,20 @@ class Settings:
         return url, email, token
 
 
-    def save_tempo_connection(self, *, token: str = '', account_id: str | None = None, enabled: bool = False,
-                            api_url: str = 'https://api.tempo.io',
-                            token_expiry_days: int | str | None = None,
-                            token_expiry_date: str | date | None = None) -> None:
-        """Store the Tempo token separately from its non-secret expiry metadata."""
+    def _tempo_account_id_available(self, current: dict) -> bool:
+        return bool(self.database.get_preference('jira_account_id') or current.get('tempo_account_id'))
+
+    def save_tempo_connection(self, *, token: str = '', account_id: str | None = None,
+                              enabled: bool | None = None,
+                              api_url: str = 'https://api.tempo.io',
+                              token_expiry_days: int | str | None = None,
+                              token_expiry_date: str | date | None = None) -> None:
+        """Save the connection; automatically enable sync unless opted out.
+
+        A newly configured Tempo connection is sync-ready by default once Jira
+        has supplied the Atlassian account ID. The Timesheet switch remains an
+        explicit opt-out, which later token saves must respect.
+        """
         url = api_url.strip().rstrip('/')
         parsed = urlparse(url)
         if parsed.scheme != 'https' or not parsed.hostname or not (
@@ -167,59 +180,75 @@ class Settings:
             raise ValueError('Choose a Tempo token expiry date before saving the new token')
         if token and chosen_date is not None and date.fromisoformat(chosen_date) < date.today():
             raise ValueError('A new Tempo token cannot have a past expiry date')
-        saved_token = self.vault.get_password(TEMPO_SERVICE, 'user_token')
-        if (days is not None or chosen_date is not None) and not (token or saved_token):
-            raise ValueError('Save a Tempo API token before setting its expiry')
-        if enabled and not (token or saved_token):
-            raise ValueError('Enter your Tempo API token before enabling sync')
-        inferred_id = self.database.get_preference('jira_account_id')
-        current = self.load()
-        # The old optional manual override is retained for existing installations,
-        # but the Settings screen no longer asks users to supply this identifier.
-        saved_id = current.get('tempo_account_id', '') if account_id is None else account_id.strip()
-        if enabled and not (inferred_id or saved_id):
-            raise ValueError('Jira account ID unavailable; save Jira settings and refresh tickets first')
 
-        was_enabled = bool(current.get('tempo_sync_enabled', False))
-        if token:
-            self.vault.set_password(TEMPO_SERVICE, 'user_token', token)
-        current.update({'tempo_api_url': url, 'tempo_sync_enabled': bool(enabled)})
+        saved_token = self.vault.get_password(TEMPO_SERVICE, 'user_token')
+        if not (token or saved_token):
+            raise ValueError('Enter your Tempo API token before saving')
+
+        current = self.load()
         if account_id is not None:
             current['tempo_account_id'] = account_id.strip()
+        has_account = self._tempo_account_id_available(current)
+        if enabled is True and not has_account:
+            raise ValueError('Save Jira settings and refresh tickets to detect your account ID')
+
+        was_enabled = bool(current.get('tempo_sync_enabled', False))
+        # Explicitly disabling sync in Timesheet is authoritative. Merely
+        # updating a token or its expiry must never override that choice.
+        wants_sync = (not current.get('tempo_sync_manually_disabled', False)
+                      if enabled is None else bool(enabled))
+        enable_sync = bool(wants_sync and has_account)
+        if token:
+            self.vault.set_password(TEMPO_SERVICE, 'user_token', token)
+        current.update({'tempo_api_url': url, 'tempo_sync_enabled': enable_sync})
         if days is not None:
             _set_expiry(current, 'tempo', days)
         elif chosen_date is not None:
             _store_expiry_date(current, 'tempo', chosen_date)
-        self.save(current)
-        if enabled and not was_enabled:
-            # First opt-in deliberately does not upload the user's entire history.
-            self.database.set_preference('tempo_sync_after', utcnow())
 
+        if enable_sync and not was_enabled:
+            # Persist the cutoff BEFORE enabling the worker; never backfill the
+            # user's historic worklogs just because a connection was saved.
+            self.database.set_preference('tempo_sync_after', utcnow())
+        self.save(current)
+        if enable_sync and not was_enabled:
+            self.database.notify_change()
+
+    def enable_tempo_sync_if_ready(self, *_args) -> None:
+        """Activate a saved connection after Jira discovers the account ID.
+
+        Called from Jira's refresh notification; an explicit opt-out wins.
+        """
+        current = self.load()
+        if (current.get('tempo_sync_enabled', False)
+                or current.get('tempo_sync_manually_disabled', False)
+                or not self._tempo_account_id_available(current)
+                or not self.vault.get_password(TEMPO_SERVICE, 'user_token')):
+            return
+        self.database.set_preference('tempo_sync_after', utcnow())
+        current['tempo_sync_enabled'] = True
+        self.save(current)
+        self.database.notify_change()
 
     def set_tempo_sync_enabled(self, enabled: bool) -> None:
-        """Apply the Tempo switch immediately, independent of unsaved form fields.
-
-        The setting is the worker's authority: toggling off cannot depend on the
-        user remembering to press an unrelated Save button.
-        """
-        
+        """Explicitly control sync from the Timesheet, independent of form saves."""
         current = self.load()
         enabled = bool(enabled)
         was_enabled = bool(current.get('tempo_sync_enabled', False))
-        if enabled == was_enabled:
-            return
+        opted_out = not enabled
         if enabled:
             if not self.vault.get_password(TEMPO_SERVICE, 'user_token'):
                 raise ValueError('Save your Tempo API token before enabling sync')
-            if not (current.get('tempo_account_id') or self.database.get_preference('jira_account_id')):
+            if not self._tempo_account_id_available(current):
                 raise ValueError('Save Jira settings and refresh tickets to detect your account ID')
-
-        current['tempo_sync_enabled'] = enabled
-        self.save(current)
+        if enabled == was_enabled and current.get('tempo_sync_manually_disabled', False) == opted_out:
+            return
         if enabled and not was_enabled:
             self.database.set_preference('tempo_sync_after', utcnow())
+        current['tempo_sync_enabled'] = enabled
+        current['tempo_sync_manually_disabled'] = opted_out
+        self.save(current)
         self.database.notify_change()
-
 
     def get_tempo_api_credentials(self) -> tuple[str, str]:
         """Connection details for any Tempo API feature, independent of sync opt-in."""
