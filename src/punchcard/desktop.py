@@ -6,12 +6,13 @@ import socket
 import subprocess
 import sys
 import threading
+from .branding import icon_path
 from .settings import ProjectPaths
 from .windows_lock import LockMonitor
 
 import zmq
 from nicegui import app
-from PIL import Image, ImageDraw
+from PIL import Image
 import pystray
 
 LOG = logging.getLogger(__name__)
@@ -84,12 +85,9 @@ class Desktop:
         self.command('show', window='settings', reload=True)
 
     def _run_tray(self):
-        icon_image = Image.new('RGBA', (64, 64), '#1c2744')
-        d = ImageDraw.Draw(icon_image)
-        d.rounded_rectangle((12, 9, 52, 55), radius=5, outline='white', width=3)
-        for y in (22, 32, 42):
-            d.rounded_rectangle((22, y, 29, y+5), radius=1, fill='#ffca75')
-            d.line((34, y+3, 45, y+3), fill='white', width=2)
+        # The tray and Windows taskbar/executable share the same icon asset.
+        with Image.open(icon_path()) as icon:
+            icon_image = icon.convert('RGBA')
 
         def schedule(callback):
             if self.loop:
