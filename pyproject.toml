@@ -1,0 +1,27 @@
+[project]
+name = "punchcard"
+version = "0.1.0"
+description = "Windows desktop activity tracking with Jira and Tempo integration"
+readme = "README.md"
+authors = [
+    { name = "Elliot Currie", email = "elliot.currie1@gmail.com" }
+]
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "nicegui>=2.14",
+    "pillow>=10",
+    "psutil>=5.9 ; sys_platform == 'win32'",
+    "pystray>=0.19",
+    "pywebview>=5",
+    "pywin32>=306 ; sys_platform == 'win32'",
+    "pywinauto>=0.6.8 ; sys_platform == 'win32'",
+    "pyzmq>=26",
+    "requests>=2.31",
+]
+
+[project.scripts]
+punchcard = "punchcard:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
