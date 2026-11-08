@@ -1,8 +1,8 @@
 """Authoritative runtime settings, API connections and credential state.
 
-Configuration writes are atomic. The encrypted Windows credential vault is shared
-by Jira and Tempo; cached settings are reloaded before use so background workers
-observe changes saved from the UI.
+Configuration writes are atomic. Jira and Tempo tokens are stored in Windows
+Credential Manager; cached settings are reloaded before use so background
+workers observe changes saved from the UI.
 """
 import json
 import math
@@ -52,10 +52,6 @@ class ProjectPaths:
         return self.data_dir / 'settings.json'
 
     @property
-    def credentials(self) -> Path:
-        return self.data_dir / 'credentials.dpapi'
-
-    @property
     def user_guide(self) -> Path:
         if getattr(sys, 'frozen', False):
             return Path(sys._MEIPASS) / 'USER_GUIDE.md'
@@ -70,7 +66,7 @@ class Settings:
         self.database = database
         self.paths = paths or ProjectPaths()
         self.config_path = Path(config_path) if config_path is not None else self.paths.settings
-        self.vault = vault if vault is not None else CredentialVault(self.paths.credentials)
+        self.vault = vault if vault is not None else CredentialVault()
         self.on_change = EventHook("settings.changed")
         self._lock = threading.RLock()
         self.data = self.load()
