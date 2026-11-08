@@ -6,6 +6,8 @@ observe changes saved from the UI.
 """
 import json
 import math
+import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -21,10 +23,18 @@ KEYRING_SERVICE = 'PunchCard Jira'
 TEMPO_SERVICE = 'PunchCard Tempo'
 
 
+def _default_project_directory() -> Path:
+    """Keep development files local, but store executable data in AppData."""
+    if getattr(sys, 'frozen', False):
+        local_app_data = os.environ.get('LOCALAPPDATA')
+        return (Path(local_app_data) if local_app_data else Path.home() / 'AppData' / 'Local') / 'PunchCard'
+    return Path(__file__).resolve().parents[2]
+
+
 @dataclass(frozen=True)
 class ProjectPaths:
-    """Own fixed PunchCard file locations; preserve existing project/data paths."""
-    project_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2])
+    """Locate writable user data separately from bundled application resources."""
+    project_dir: Path = field(default_factory=_default_project_directory)
 
     @property
     def data_dir(self) -> Path:
@@ -44,6 +54,8 @@ class ProjectPaths:
 
     @property
     def user_guide(self) -> Path:
+        if getattr(sys, 'frozen', False):
+            return Path(sys._MEIPASS) / 'USER_GUIDE.md'
         return self.project_dir / 'USER_GUIDE.md'
 
 
