@@ -41,14 +41,25 @@ class Desktop:
         self.loop = loop
         if self.worker and self.worker.poll() is None:
             return
+        self.paths.project_dir.mkdir(parents=True, exist_ok=True)
         self.worker = subprocess.Popen(
-            [sys.executable, '-u', '-m', 'punchcard.desktop_worker',
-             '--web-port', str(self.web_port), '--command-port', str(self.command_port)],
+            self.worker_command(),
             cwd=str(self.paths.project_dir),
         )
         self.lock_monitor = LockMonitor(self.on_windows_locked, self.on_windows_unlocked)
         self.lock_monitor.start()
         threading.Thread(target=self._run_tray, daemon=True).start()
+
+    def worker_command(self) -> list[str]:
+        """Start the webview worker using Python, or this exe when frozen."""
+        if getattr(sys, 'frozen', False):
+            command = [sys.executable, '--punchcard-desktop-worker']
+        else:
+            command = [sys.executable, '-u', '-m', 'punchcard.desktop_worker']
+        return command + [
+            '--web-port', str(self.web_port),
+            '--command-port', str(self.command_port),
+        ]
 
     def command(self, cmd: str, *, window: str = 'widget', reload: bool = False,
                 start_date: str | None = None, end_date: str | None = None):
