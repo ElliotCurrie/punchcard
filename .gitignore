@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local configuration
+.env
+.env.*
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/

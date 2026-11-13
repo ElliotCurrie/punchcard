@@ -168,6 +168,15 @@ class Database:
                 VALUES(?,?,?,?,?,?)''', (kind, ticket_key, title, now, now,
                                          json.dumps(metadata or {}, ensure_ascii=False)))
 
+    def update_active_session_note(self, session_id: int, note: str) -> None:
+        """Save notes only against the session that is still active."""
+        with self.connection() as db:
+            result = db.execute('UPDATE sessions SET note=? WHERE id=? AND ended_at IS NULL',
+                                (note, session_id))
+            if result.rowcount != 1:
+                raise ValueError('This session has ended. Edit its notes in Timesheet instead.')
+        self.notify_change()
+
     def update_active_meeting(self, title: str, metadata: dict):
         # Updates metadata without affecting the clock.
         with self.connection() as db:

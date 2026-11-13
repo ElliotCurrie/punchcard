@@ -1,4 +1,4 @@
-"""Ticket selection UI, separate from Jira ticket data and tracking state."""
+"""Issue selection UI, separate from Jira issue data and tracking state."""
 import asyncio
 from nicegui import ui
 from .layout import window_layout
@@ -15,7 +15,7 @@ class TicketPicker:
         self._revision += 1
 
     def select_ticket(self, issue_key: str) -> bool:
-        """Selection is UI state; it need not start tracking a ticket."""
+        """Selection is UI state; it need not start tracking an issue."""
         ticket = self.jira.get_ticket(issue_key)
         if not ticket or ticket['status_category'] == 'done':
             return False
@@ -33,25 +33,24 @@ class TicketPicker:
         def render_ticket_picker():
             """Hierarchy picker; explicitly refresh Jira data from here."""
             ui.add_css('.q-tree__node-header{min-height:36px;}')
-            with window_layout(self.desktop, 'tickets', 'PUNCHCARD / TICKETS', padding=18):
+            with window_layout(self.desktop, 'tickets', 'PUNCHCARD / ISSUES', padding=18):
                 with ui.row().classes('items-center justify-between w-full'):
-                    ui.label('Select Jira ticket').classes('text-h6')
+                    ui.label('Select Jira issue').classes('text-h6')
 
                     async def refresh_tickets():
                         refresh_button.disable()
                         try:
                             latest = await asyncio.to_thread(self.jira.refresh_tickets)
                             render_tree.refresh()
-                            ui.notify(f'{sum(bool(t["assigned"]) for t in latest)} unfinished assigned tickets fetched',
+                            ui.notify(f'{sum(bool(t["assigned"]) for t in latest)} unfinished assigned issues fetched',
                                       type='positive')
                         except Exception as exc:
-                            ui.notify(f'Could not refresh Jira tickets: {exc}', type='negative')
+                            ui.notify(f'Could not refresh Jira issues: {exc}', type='negative')
                         finally:
                             refresh_button.enable()
 
-                    refresh_button = ui.button('Refresh', icon='refresh',
-                                                on_click=refresh_tickets).props('outline dense')
-                ui.label('Unfinished assigned tickets grouped under their Jira parents. '
+                    refresh_button = ui.button(icon='refresh', on_click=refresh_tickets).props('flat dense round')
+                ui.label('Unfinished assigned issues grouped under their Jira parents. '
                          'Unassigned parents are shown for context.').classes('text-caption text-grey-7')
 
                 @ui.refreshable
@@ -60,7 +59,7 @@ class TicketPicker:
                     items = {t['issue_key']: t for t in ticket_list}
 
                     if not ticket_list:
-                        ui.label('No Jira tickets available. Click Refresh to fetch them.').classes('text-grey-7')
+                        ui.label('No Jira issues available. Click Refresh to fetch them.').classes('text-grey-7')
                         return
 
                     def select_issue(e):
@@ -80,7 +79,7 @@ class TicketPicker:
                         ui.notify(f'Selected {key}', color='positive')
                         self.desktop.command('hide', window='tickets')
 
-                    search = ui.input('Filter tickets', placeholder='Key or summary').props(
+                    search = ui.input('Filter issues', placeholder='Key or summary').props(
                         'outlined dense clearable').classes('w-full')
                     tree = ui.tree(self._build_issue_tree(ticket_list),
                                    on_select=select_issue).classes('w-full')
@@ -115,7 +114,6 @@ class TicketPicker:
 
                 ui.timer(1.0, refresh_changed_tickets)
 
-
     @staticmethod
     def _fallback_icon(issue_type: str) -> str:
         """Quasar/Material icon used when Jira's own issue-type icon is unavailable."""
@@ -131,7 +129,6 @@ class TicketPicker:
         if 'task' in name:
             return 'task_alt'
         return 'assignment'
-
 
     @classmethod
     def _build_issue_tree(cls, tickets: list[dict]) -> list[dict]:
@@ -158,7 +155,6 @@ class TicketPicker:
         roots = []
         for key, item in items.items():
             parent = item.get('parent_key')
-            # Check ancestor chain to prevent cycles from corrupting the view.
             trail = {key}
             ancestor = parent
             cyclic = False

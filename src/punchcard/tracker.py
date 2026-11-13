@@ -130,6 +130,18 @@ class SessionTracker:
             self._refresh_active()
         self._notify(completed)
 
+    def update_active_note(self, session_id: int, note: str) -> None:
+        """Edit the exact active session, not whichever session starts next."""
+        with self.lock:
+            current = self.active_session
+            if not current or current['id'] != session_id:
+                raise ValueError('The tracking session has changed. Edit its notes in Timesheet instead.')
+            if current.get('note', '') == note:
+                return
+            self.database.update_active_session_note(session_id, note)
+            self._refresh_active()
+        self._notify()
+
     def checkpoint(self) -> None:
         with self.lock:
             self.database.checkpoint_active_session()

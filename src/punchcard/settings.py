@@ -99,6 +99,69 @@ class Settings:
     def expiring_tokens(self) -> list[str]:
         return expiring_tokens(settings=self.load())
 
+    def connection_status(self, kind: str) -> dict:
+        """Last verified connection state, not a claim of continuous connectivity."""
+        if kind not in ('jira', 'tempo'):
+            raise ValueError('Unknown connection type')
+        current = self.load()
+        if kind == 'jira':
+            url = current.get('jira_url', '').rstrip('/')
+            email = current.get('jira_email', '')
+            configured = bool(url and email and
+                              self.vault.get_password(KEYRING_SERVICE, f'{url}|{email}'))
+        else:
+            configured = bool(self.vault.get_password(TEMPO_SERVICE, 'user_token'))
+        state = current.get(f'{kind}_connection_state', 'disconnected') if configured else 'disconnected'
+        if state not in ('connected', 'disconnected', 'connection_lost'):
+            state = 'disconnected'
+        labels = {'connected': 'Connected', 'disconnected': 'Disconnected',
+                  'connection_lost': 'Connection lost'}
+        colors = {'connected': 'positive', 'disconnected': 'grey-6',
+                  'connection_lost': 'negative'}
+        detail = (current.get(f'{kind}_connection_detail', '') if configured
+                  else 'No API token configured.')
+        if not detail:
+            detail = ('Last API check succeeded.' if state == 'connected'
+                      else 'Connection has not been verified.')
+        return {'state': state, 'label': labels[state], 'color': colors[state],
+                'configured': configured, 'detail': detail,
+                'last_checked': (current.get(f'{kind}_connection_checked_at', '')
+                                 if configured else '')}
+
+    def record_connection_check(self, kind: str, *, success: bool, detail: str = '') -> None:
+        """Persist API-test results; distinguish first failure from lost connection."""
+        previous = self.connection_status(kind)['state']
+        current = self.load()
+        current[f'{kind}_connection_state'] = (
+            'connected' if success else
+            'connection_lost' if previous in ('connected', 'connection_lost') else
+            'disconnected'
+        )
+        current[f'{kind}_connection_detail'] = detail or (
+            'API connection verified.' if success else 'API connection check failed.')
+        current[f'{kind}_connection_checked_at'] = utcnow()
+        self.save(current)
+
+    def tempo_sync_status(self) -> str:
+        """Human-readable sync readiness, without duplicating connection errors."""
+        current = self.load()
+        connection = self.connection_status('tempo')
+        if not connection['configured']:
+            return 'Connect Tempo to enable automatic synchronisation.'
+        if connection['state'] != 'connected':
+            if current.get('tempo_sync_enabled', False):
+                return 'Automatic synchronisation is enabled, but Tempo is unreachable.'
+            if current.get('tempo_sync_manually_disabled', False):
+                return 'Automatic synchronisation is switched off manually.'
+            return 'Automatic synchronisation is disabled.'
+        if current.get('tempo_sync_manually_disabled', False):
+            return 'Tempo connected. Automatic synchronisation was switched off manually.'
+        if not self._tempo_account_id_available(current):
+            return 'Tempo connected. Jira account ID missing; reconnect Jira before enabling sync.'
+        if current.get('tempo_sync_enabled', False):
+            return 'Tempo connected. Automatic synchronisation is enabled.'
+        return 'Tempo connected. Automatic synchronisation is not enabled.'
+
     def save_jira_connection(self, jira_url: str, jira_email: str, token: str = '',
                       token_expiry_days: int | str | None = None,
                       token_expiry_date: str | date | None = None) -> None:
@@ -119,21 +182,43 @@ class Settings:
             raise ValueError('A new Jira token cannot have a past expiry date')
         if (days is not None or chosen_date is not None) and not token and not self.vault.get_password(KEYRING_SERVICE, f'{url}|{email}'):
             raise ValueError('Save a Jira API token before setting its expiry')
+        current = self.load()
+        identity_changed = ((current.get('jira_url', '').rstrip('/'),
+                             current.get('jira_email', '')) != (url, email))
         if token:
             self.vault.set_password(KEYRING_SERVICE, f'{url}|{email}', token)
-        current = self.load()
         if (current.get('jira_url', '').rstrip('/'), current.get('jira_email', '')) != (url, email):
             # Expiry metadata belongs to the old Jira identity, not the new one.
             current.pop('jira_token_expiry_date', None)
             current.pop('jira_token_expires_at', None)
             current.pop('jira_token_validity_days_at_save', None)
         current.update({'jira_url': url, 'jira_email': email})
+        if token or identity_changed:
+            current['jira_connection_state'] = 'disconnected'
+            current['jira_connection_detail'] = 'Jira credentials saved; connection not yet verified.'
+            current.pop('jira_connection_checked_at', None)
         if days is not None:
             _set_expiry(current, 'jira', days)
         elif chosen_date is not None:
             _store_expiry_date(current, 'jira', chosen_date)
         self.save(current)
 
+
+    def disconnect_jira(self) -> None:
+        """Remove Jira authentication and metadata, without deleting session history."""
+        current = self.load()
+        url = current.get('jira_url', '').rstrip('/')
+        email = current.get('jira_email', '')
+        if url and email:
+            self.vault.delete_password(KEYRING_SERVICE, f'{url}|{email}')
+        for key in ('jira_url', 'jira_email', 'jira_token_expiry_date', 'jira_token_expires_at',
+                    'jira_token_validity_days_at_save', 'jira_connection_state',
+                    'jira_connection_detail', 'jira_connection_checked_at', 'tempo_account_id'):
+            current.pop(key, None)
+        current.update({'jira_url': '', 'jira_email': '', 'tempo_sync_enabled': False})
+        self.database.set_preference('jira_account_id', '')
+        self.save(current)
+        self.database.notify_change()
 
     def get_jira_credentials(self) -> tuple[str, str, str]:
         settings = self.load()
@@ -154,13 +239,16 @@ class Settings:
                               enabled: bool | None = None,
                               api_url: str = 'https://api.tempo.io',
                               token_expiry_days: int | str | None = None,
-                              token_expiry_date: str | date | None = None) -> None:
-        """Save the connection; automatically enable sync unless opted out.
+                              token_expiry_date: str | date | None = None,
+                              validated: bool = False) -> None:
+        """Persist an API-verified connection; automatically enable unless opted out.
 
         A newly configured Tempo connection is sync-ready by default once Jira
         has supplied the Atlassian account ID. The Timesheet switch remains an
         explicit opt-out, which later token saves must respect.
         """
+        if not validated:
+            raise ValueError('Tempo must validate the API connection before saving')
         url = api_url.strip().rstrip('/')
         parsed = urlparse(url)
         if parsed.scheme != 'https' or not parsed.hostname or not (
@@ -186,17 +274,22 @@ class Settings:
             current['tempo_account_id'] = account_id.strip()
         has_account = self._tempo_account_id_available(current)
         if enabled is True and not has_account:
-            raise ValueError('Save Jira settings and refresh tickets to detect your account ID')
+            raise ValueError('Jira account ID missing; reconnect Jira to enable Tempo sync')
 
         was_enabled = bool(current.get('tempo_sync_enabled', False))
         # Explicitly disabling sync in Timesheet is authoritative. Merely
         # updating a token or its expiry must never override that choice.
-        wants_sync = (not current.get('tempo_sync_manually_disabled', False)
-                      if enabled is None else bool(enabled))
+        # The explicit opt-out always wins, including when credentials change.
+        wants_sync = not current.get('tempo_sync_manually_disabled', False) and enabled is not False
         enable_sync = bool(wants_sync and has_account)
         if token:
             self.vault.set_password(TEMPO_SERVICE, 'user_token', token)
-        current.update({'tempo_api_url': url, 'tempo_sync_enabled': enable_sync})
+        current.update({
+            'tempo_api_url': url, 'tempo_sync_enabled': enable_sync,
+            'tempo_connection_state': 'connected',
+            'tempo_connection_detail': 'Tempo API verified successfully.',
+            'tempo_connection_checked_at': utcnow(),
+        })
         if days is not None:
             _set_expiry(current, 'tempo', days)
         elif chosen_date is not None:
@@ -219,6 +312,7 @@ class Settings:
         if (current.get('tempo_sync_enabled', False)
                 or current.get('tempo_sync_manually_disabled', False)
                 or not self._tempo_account_id_available(current)
+                or self.connection_status('tempo')['state'] != 'connected'
                 or not self.vault.get_password(TEMPO_SERVICE, 'user_token')):
             return
         self.database.set_preference('tempo_sync_after', utcnow())
@@ -235,14 +329,28 @@ class Settings:
         if enabled:
             if not self.vault.get_password(TEMPO_SERVICE, 'user_token'):
                 raise ValueError('Save your Tempo API token before enabling sync')
+            if self.connection_status('tempo')['state'] != 'connected':
+                raise ValueError('Validate the Tempo connection in Settings before enabling sync')
             if not self._tempo_account_id_available(current):
-                raise ValueError('Save Jira settings and refresh tickets to detect your account ID')
+                raise ValueError('Jira account ID missing; reconnect Jira to enable Tempo sync')
         if enabled == was_enabled and current.get('tempo_sync_manually_disabled', False) == opted_out:
             return
         if enabled and not was_enabled:
             self.database.set_preference('tempo_sync_after', utcnow())
         current['tempo_sync_enabled'] = enabled
         current['tempo_sync_manually_disabled'] = opted_out
+        self.save(current)
+        self.database.notify_change()
+
+    def disconnect_tempo(self) -> None:
+        """Remove the Tempo token and opt-out state; leave session history intact."""
+        self.vault.delete_password(TEMPO_SERVICE, 'user_token')
+        current = self.load()
+        for key in ('tempo_api_url', 'tempo_token_expiry_date', 'tempo_token_expires_at',
+                    'tempo_token_validity_days_at_save', 'tempo_connection_state',
+                    'tempo_connection_detail', 'tempo_connection_checked_at'):
+            current.pop(key, None)
+        current.update({'tempo_sync_enabled': False, 'tempo_sync_manually_disabled': False})
         self.save(current)
         self.database.notify_change()
 
@@ -259,7 +367,7 @@ class Settings:
         base_url, token = self.get_tempo_api_credentials()
         account_id = self.database.get_preference('jira_account_id') or self.load().get('tempo_account_id')
         if not account_id:
-            raise ValueError('Tempo needs your Jira account ID; refresh your Jira tickets first')
+            raise ValueError('Tempo needs your Jira account ID; reconnect Jira first')
         return base_url, token, account_id
 
 
