@@ -3,6 +3,7 @@ import logging
 from urllib.parse import quote
 import requests
 from .events import EventHook
+from .connection_errors import network_error
 
 LOG = logging.getLogger(__name__)
 JQL = 'assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC'
@@ -34,14 +35,69 @@ class Jira:
         return [ticket for ticket in self.list_tickets()
                 if needle in ticket['issue_key'].casefold() or needle in ticket['title'].casefold()]
 
+    def disconnect(self) -> None:
+        """Forget Jira credentials and selectable tickets, but retain work history."""
+        self.settings.disconnect_jira()
+        self.database.save_tickets([])
+        self.database.set_preference('last_ticket', '')
+        self.database.set_preference('last_ticket_refresh', '')
+        self.tickets.clear()
+        self.last_refreshed = None
+        self.on_change.emit()
+
     def refresh_tickets(self) -> list[dict]:
         """Refresh remote Jira issues, persist them, then replace the runtime cache."""
-        issues = self._fetch_tickets()
+        try:
+            issues = self._fetch_tickets()
+        except Exception as exc:
+            url = self.settings.load().get('jira_url', '')
+            if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                code = exc.response.status_code
+                detail = (f'Jira authentication or permission error (HTTP {code})'
+                          if code in (401, 403) else f'Jira API error (HTTP {code})')
+            elif isinstance(exc, requests.RequestException):
+                detail = network_error('Jira', url, exc)
+            else:
+                detail = f'Jira issue request failed: {exc}'
+            self.settings.record_connection_check('jira', success=False, detail=detail)
+            raise ConnectionError(detail) from exc
+        # A request may finish after Jira was disconnected in another window.
+        # Never repopulate its selectable cache with stale credentials.
+        if not self.settings.connection_status('jira')['configured']:
+            raise ConnectionError('Jira was disconnected while issues were loading. Reconnect to refresh.')
         self.database.save_tickets(issues)
+        self.settings.record_connection_check('jira', success=True,
+            detail='Jira API verified successfully.')
         self.tickets = {ticket['issue_key']: ticket for ticket in self.database.list_tickets()}
         self.last_refreshed = self.database.get_preference('last_ticket_refresh') or None
         self.on_change.emit()
         return issues
+
+    def check_connection(self) -> None:
+        """Read-only Jira check, without changing the ticket cache."""
+        try:
+            jira_url, email, token = self.settings.get_jira_credentials()
+            with requests.Session() as session:
+                session.auth = (email, token)
+                session.headers.update({'Accept': 'application/json'})
+                base = self._api_base(session, jira_url)
+                response = session.get(f'{base}/rest/api/3/search/jql',
+                    params={'jql': JQL, 'fields': 'summary', 'maxResults': 1},
+                    timeout=(5, 20))
+                response.raise_for_status()
+        except Exception as exc:
+            if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                code = exc.response.status_code
+                detail = (f'Jira authentication or permission error (HTTP {code})'
+                          if code in (401, 403) else f'Jira API error (HTTP {code})')
+            elif isinstance(exc, requests.RequestException):
+                detail = network_error('Jira', self.settings.load().get('jira_url', ''), exc)
+            else:
+                detail = str(exc)
+            self.settings.record_connection_check('jira', success=False, detail=detail)
+            raise ConnectionError(detail) from exc
+        self.settings.record_connection_check('jira', success=True,
+            detail='Jira API verified successfully.')
 
     def _api_base(self, session: requests.Session, jira_site_url: str) -> str:
         """Scoped Jira API tokens use the Atlassian gateway."""

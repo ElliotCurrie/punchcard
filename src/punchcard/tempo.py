@@ -10,7 +10,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests
 from .database import Database
+from .settings import TEMPO_SERVICE
 from .events import EventHook
+from .connection_errors import network_error
 from .timestamps import local_datetime
 
 LOG = logging.getLogger(__name__)
@@ -81,6 +83,73 @@ class Tempo:
         finally:
             if self.http is None:
                 client.close()
+
+    def validate_connection(self, token: str, api_url: str) -> None:
+        """Read-only Tempo check; never create a worklog during validation."""
+        client = self.http or requests.Session()
+        headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+        try:
+            response = self._request(
+                client, 'GET', f'{api_url.rstrip("/")}/4/worklogs',
+                require_sync=False, params={'limit': 1}, headers=headers,
+                timeout=(5, 20),
+            )
+        except requests.RequestException as exc:
+            raise ConnectionError(network_error('Tempo', api_url, exc)) from exc
+        finally:
+            if self.http is None:
+                client.close()
+        if response.status_code == 401:
+            raise ValueError('Tempo rejected the API token (HTTP 401)')
+        if response.status_code in (403, 404):
+            raise PermissionError(
+                f'Tempo denied access (HTTP {response.status_code}). '
+                'Check Worklogs permission and the regional API endpoint.'
+            )
+        if not response.ok:
+            raise ConnectionError(f'Tempo API unavailable (HTTP {response.status_code})')
+
+    def save_connection(self, *, token: str = '', api_url: str = 'https://api.tempo.io',
+                        token_expiry_date=None) -> None:
+        """Validate then persist a Tempo connection; reject invalid replacements."""
+        candidate = token.strip()
+        existing = self.settings.load()
+        old_url = existing.get('tempo_api_url', 'https://api.tempo.io').rstrip('/')
+        old_token = self.settings.vault.get_password(TEMPO_SERVICE, 'user_token')
+        candidate_token = candidate or old_token
+        if not candidate_token:
+            raise ValueError('Enter a Tempo API token first')
+        url = api_url.strip().rstrip('/')
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if (parsed.scheme != 'https' or not parsed.hostname or
+            not (parsed.hostname == 'api.tempo.io' or
+                 parsed.hostname.endswith('.tempo.io')) or
+            parsed.username or parsed.password):
+            raise ValueError('Use an HTTPS Tempo API URL (api.tempo.io or a Tempo regional endpoint)')
+        try:
+            self.validate_connection(candidate_token, url)
+        except (ValueError, PermissionError, ConnectionError) as exc:
+            # Do not mark the saved connection lost when a *replacement* fails.
+            if not candidate and old_url == url:
+                self.settings.record_connection_check('tempo', success=False, detail=str(exc))
+            raise
+        self.settings.save_tempo_connection(
+            token=candidate, api_url=url, token_expiry_date=token_expiry_date,
+            validated=True,
+        )
+
+    def check_connection(self) -> None:
+        """Recheck the saved credentials, retaining the user's manual sync choice."""
+        try:
+            url, token = self.settings.get_tempo_api_credentials()
+            self.validate_connection(token, url)
+        except (ValueError, PermissionError, ConnectionError) as exc:
+            self.settings.record_connection_check('tempo', success=False, detail=str(exc))
+            raise
+        self.settings.record_connection_check('tempo', success=True,
+            detail='Tempo API verified successfully.')
+        self.settings.enable_tempo_sync_if_ready()
 
     def _verify_day(self, client, base_url: str, headers: dict, day: str, cutoff: str,
                     counts: dict, max_verifications: int = 50):
@@ -184,7 +253,7 @@ class Tempo:
                 if not row.get('ticket_key'):
                     reason, state = 'Unassigned session; not submitted to Tempo', 'unassigned'
                 elif not str(row.get('jira_issue_id') or '').isdigit():
-                    reason, state = 'Jira numeric issue ID unavailable; refresh Jira tickets', 'missing_issue'
+                    reason, state = 'Jira numeric issue ID unavailable; refresh Jira issues', 'missing_issue'
                 elif slot is None:
                     reason = 'The minute-aligned interval is under one minute; kept locally'
 
@@ -370,7 +439,7 @@ def timesheet_minute_range(row: dict) -> str:
 def worklog_payload(row: dict, account_id: str) -> dict:
     """Represent one completed session as one Tempo minute-aligned worklog."""
     if not row.get('ended_at') or not row.get('ticket_key') or not str(row.get('jira_issue_id') or '').isdigit():
-        raise ValueError('A completed ticket session with a Jira numeric issue ID is required')
+        raise ValueError('A completed session linked to a Jira issue ID is required')
     slot = session_slot(row)
     if slot is None:
         raise ValueError('Session has no representable whole-minute interval in Tempo')
@@ -413,7 +482,7 @@ def session_sync_display(row: dict, sync: dict | None, *, enabled: bool, cutoff:
     if remote_id and (not row.get('ticket_key') or session_slot(row) is None):
         detail = 'Remove linked worklog from Tempo'
     elif not row.get('ticket_key'):
-        return {'text': 'Local', 'color': 'grey', 'queued': False, 'detail': 'No Jira ticket assigned'}
+        return {'text': 'Local', 'color': 'grey', 'queued': False, 'detail': 'No Jira issue assigned'}
     elif not remote_id and (not cutoff or row['started_at'] < cutoff):
         return {'text': 'Local', 'color': 'grey', 'queued': False, 'detail': 'Recorded before Tempo sync was enabled'}
     elif session_slot(row) is None:

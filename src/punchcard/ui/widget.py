@@ -25,30 +25,34 @@ class Widget:
                 with ui.row().classes('w-full items-center justify-between'):
                     ui.label('Working on').classes('text-caption text-grey-7')
 
-                    async def choose_ticket():
-                        # Use the locally cached hierarchy whenever possible.
-                        # Manual refresh now lives in the ticket picker itself.
+                    async def choose_issue():
+                        # Use cached issues where possible; refresh when empty.
                         if self.jira.list_tickets():
                             open_view(self.desktop, 'tickets', reload=True)
                             return
+
                         choose_button.disable()
                         choose_button.props('loading')
                         try:
                             issues = await asyncio.to_thread(self.jira.refresh_tickets)
                             assigned = sum(bool(t['assigned']) for t in issues)
                             if not assigned:
-                                ui.notify('No unfinished assigned tickets found', type='warning')
+                                ui.notify('No unfinished assigned issues found', type='warning')
                             open_view(self.desktop, 'tickets', reload=True)
                         except Exception as exc:
-                            ui.notify(f'Could not fetch Jira tickets: {exc}', type='negative')
+                            ui.notify(f'Could not fetch Jira issues: {exc}', type='negative')
                         finally:
                             choose_button.props(remove='loading')
                             choose_button.enable()
 
-                    choose_button = ui.button(icon='account_tree',
-                                              on_click=choose_ticket).props('dense outline round size=sm').tooltip('Choose ticket')
-                current_ticket_label = ui.label('Select a Jira ticket').classes(
-                    'font-medium text-blue-grey-9 w-full text-ellipsis overflow-hidden')
+                    with ui.row().classes('w-full items-center no-wrap gap-2'):
+                        choose_button = ui.button(
+                            icon='edit', on_click=choose_issue
+                        ).props('round size=sm').tooltip('Change Jira issue')
+
+                        current_issue_label = ui.label('Select a Jira issue').classes(
+                            'font-medium text-blue-grey-9 text-ellipsis overflow-hidden whitespace-nowrap flex-1 min-w-0'
+                        )
 
                 time_label = ui.label('00:00:00').classes('text-3xl font-semibold text-blue-grey-9').style(
                     'font-family: "Segoe UI", Arial, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0;')
@@ -59,15 +63,21 @@ class Widget:
                     active = s['current']
                     is_tracking = active is not None
                     if button_state['tracking'] != is_tracking:
-                        track_button.set_text('Stop' if is_tracking else 'Start')
                         track_button.set_icon('stop' if is_tracking else 'play_arrow')
                         track_button.props('color=negative' if is_tracking else 'color=positive')
                         button_state['tracking'] = is_tracking
+                    if button_state['notes_enabled'] != is_tracking:
+                        note_button.enable() if is_tracking else note_button.disable()
+                        button_state['notes_enabled'] = is_tracking
+                    has_note = bool(active and active.get('note'))
+                    if button_state['has_note'] != has_note:
+                        note_button.set_icon('edit_note' if has_note else 'note_add')
+                        button_state['has_note'] = has_note
                     if active:
                         if active['kind'] == 'ticket':
-                            current_ticket_label.set_text(f"{active['ticket_key']} · {active['title']}")
+                            current_issue_label.set_text(f"{active['ticket_key']} · {active['title']}")
                         else:
-                            current_ticket_label.set_text('Teams call')
+                            current_issue_label.set_text('Teams call')
                         time_label.set_text(format_elapsed(s['elapsed_seconds']))
                         status_badge.set_text('Tracking' if active['kind'] == 'ticket' else 'Meeting')
                         status_badge.props('color=positive' if active['kind'] == 'ticket' else 'color=orange')
@@ -75,22 +85,51 @@ class Widget:
                     else:
                         last = next((t for t in self.jira.list_tickets()
                                      if t['issue_key'] == s['last_ticket']), None)
-                        current_ticket_label.set_text(
-                            f"{last['issue_key']} · {last['title']}" if last else 'Select a Jira ticket')
+                        current_issue_label.set_text(
+                            f"{last['issue_key']} · {last['title']}" if last else 'Select a Jira issue')
                         time_label.set_text('00:00:00')
                         status_badge.set_text('Paused')
                         status_badge.props('color=grey')
-                        details_label.set_text('Choose a ticket or resume tracking')
+                        details_label.set_text('Choose an issue or resume tracking')
 
                 def pause_resume():
                     if not self.on_toggle_tracking():
-                        ui.notify('Choose an unfinished Jira ticket first', color='warning')
+                        ui.notify('Choose an unfinished Jira issue first', color='warning')
                     refresh_tracking_display()
 
-                button_state = {'tracking': None}
-                with ui.row().classes('gap-2 w-full'):
-                    track_button = ui.button('Start', on_click=pause_resume, icon='play_arrow',
+                def open_notes():
+                    session = self.tracker.status()['current']
+                    if not session:
+                        ui.notify('Start tracking to add a session note', type='warning')
+                        return
+                    session_id = session['id']
+                    with ui.dialog() as dialog, ui.card().classes('w-96 max-w-full gap-3'):
+                        ui.label('Session notes').classes('text-h6')
+                        note_input = ui.textarea('Notes', value=session.get('note') or '').props(
+                            'outlined autogrow').classes('w-full')
+
+                        def save_note():
+                            try:
+                                self.tracker.update_active_note(session_id, note_input.value or '')
+                            except Exception as exc:
+                                ui.notify(str(exc), type='negative')
+                                return
+                            dialog.close()
+                            refresh_tracking_display()
+                            ui.notify('Session note saved', type='positive')
+
+                        with ui.row().classes('w-full justify-end gap-2'):
+                            ui.button('Cancel', on_click=dialog.close).props('flat')
+                            ui.button('Save', on_click=save_note)
+                    dialog.open()
+
+                button_state = {'tracking': None, 'notes_enabled': None, 'has_note': None}
+                with ui.row().classes('gap-2 w-full items-center'):
+                    track_button = ui.button(on_click=pause_resume, icon='play_arrow',
                                              color='positive').props('dense unelevated').classes('flex-1')
+                    track_button.tooltip('Start or stop tracking')
+                    note_button = ui.button(icon='note_add', on_click=open_notes).props(
+                        'dense unelevated').tooltip('Session notes')
 
                 with ui.row().classes('items-center w-full justify-between no-wrap'):
                     ui.button(icon='list_alt', on_click=lambda: open_view(self.desktop, 'timesheet')).props(

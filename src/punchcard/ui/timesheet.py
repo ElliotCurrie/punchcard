@@ -110,6 +110,7 @@ class TimesheetView:
                         tempo_enabled.set_value(current)
                         ui.notify(str(exc), type='warning')
                         return
+                    tempo_status_label.set_text(self.settings.tempo_sync_status())
                     render_sessions.refresh()
 
                 with ui.row().classes('w-full items-center justify-between no-wrap gap-2'):
@@ -120,6 +121,8 @@ class TimesheetView:
                         on_change=toggle_tempo,
                     ).props('dense size=sm').classes('pc-tempo-toggle')
                     tempo_enabled.tooltip('Sync completed sessions automatically')
+                tempo_status_label = ui.label(self.settings.tempo_sync_status()).classes(
+                    'text-caption text-grey-7')
 
                 # The signature is checked periodically to catch background sync and
                 # tracker writes. Live totals update without recreating edit dialogs.
@@ -202,7 +205,7 @@ class TimesheetView:
                         if row['ticket_key'] and row['ticket_key'] not in opts:
                             opts[row['ticket_key']] = row['ticket_key']
                         issue = ui.select(opts, value=row['ticket_key'] or '',
-                                          label='Associate with ticket').classes('w-full')
+                                          label='Associate with Jira issue').classes('w-full')
                         note = ui.textarea('Notes', value=row['note']).classes('w-full')
 
                         def save_edit():
@@ -244,6 +247,12 @@ class TimesheetView:
                     dialog.open()
 
                 def update_live_timesheet():
+                    stored_enabled = bool(self.settings.load().get('tempo_sync_enabled', False))
+                    if bool(tempo_enabled.value) != stored_enabled:
+                        tempo_enabled.set_value(stored_enabled)
+                    status_text = self.settings.tempo_sync_status()
+                    if tempo_status_label.text != status_text:
+                        tempo_status_label.set_text(status_text)
                     day = selected_date()
                     if day is None:
                         return
