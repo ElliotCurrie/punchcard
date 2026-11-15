@@ -28,6 +28,7 @@ from .ui.ticket_picker import TicketPicker
 from .ui.timesheet import TimesheetView
 from .ui.user_guide import UserGuideView
 from .ui.widget import Widget
+from .connectivity import Connectivity
 
 LOG = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class Application:
         self.settings = Settings(self.database, paths=self.paths)
         self.jira = Jira(self.settings, self.database)
         self.tempo = Tempo(self.settings, self.database)
+        self.connectivity = Connectivity(self.settings)
         self.tracker = SessionTracker(self.database)
         self.timesheet = Timesheet(self.database)
         self.teams = TeamsCallMonitor(self._on_teams_event)
@@ -54,11 +56,12 @@ class Application:
 
         # UI objects: presentation and user intent, never business rules.
         self.widget = Widget(
-            self.desktop, self.tracker, self.jira, self.settings,
+            self.desktop, self.tracker, self.jira, self.settings, self.connectivity,
             on_toggle_tracking=self.toggle_tracking,
         )
         self.ticket_picker = TicketPicker(
-            self.desktop, self.jira, on_start_tracking=self.start_tracking_ticket,
+            self.desktop, self.jira, self.connectivity,
+            on_start_tracking=self.start_tracking_ticket,
         )
         self.timesheet_view = TimesheetView(
             self.desktop, self.timesheet, self.tempo, self.settings, self.jira,
@@ -79,6 +82,7 @@ class Application:
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        self._connectivity_task: asyncio.Task | None = None
 
     # Cross-component user actions; actual state transitions belong to objects.
     def start_tracking_ticket(self, ticket_key: str) -> bool:
@@ -128,6 +132,15 @@ class Application:
 
         self._loop.call_soon_threadsafe(apply)
 
+    async def _monitor_connectivity(self) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(self.connectivity.check)
+            except Exception:
+                LOG.exception('Connectivity check failed')
+
+            await asyncio.sleep(30)
+
     def register_routes(self) -> None:
         self.widget.register_page()
         self.ticket_picker.register_page()
@@ -164,6 +177,10 @@ class Application:
         self.database.set_change_callback(self._request_tempo_sync)
         self.tempo.start()
         self._heartbeat_task = asyncio.create_task(self._heartbeat(), name='PunchCardHeartbeat')
+        self._connectivity_task = asyncio.create_task(
+            self._monitor_connectivity(),
+            name='PunchCardConnectivity',
+        )
 
         if os.name == 'nt':
             self.teams.start()
@@ -174,13 +191,15 @@ class Application:
     async def stop(self) -> None:
         self.database.set_change_callback(None)
         self.teams.stop()
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            self._heartbeat_task = None
+        for name in ('_heartbeat_task', '_connectivity_task'):
+            task = getattr(self, name)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, name, None)
         await self.tempo.stop()
         self.tracker.pause('application_exit')
         self.desktop.stop()

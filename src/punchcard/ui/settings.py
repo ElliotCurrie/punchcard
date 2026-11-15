@@ -93,8 +93,7 @@ class SettingsView:
                         email_input = ui.input('Jira account email', value=saved.get('jira_email', '')).classes('w-full')
                         token_input = ui.input('Jira API token (blank keeps current)', password=True,
                                                password_toggle_button=True).classes('w-full')
-                        ui.label('API token: read:jira-work').classes('text-caption text-grey-7')
-                        ui.label('Jira: Browse Projects').classes('text-caption text-grey-7')
+                        ui.label('API token: read:jira-work, read:jira-user').classes('text-caption text-grey-7')
                         jira_expiry = ui.input('Token expiry date', value=self.settings.token_expiry_value('jira')).props('type=date').classes('w-full')
                         jira_expiry_label = ui.label('Token · ' + self.settings.expiry_status('jira')['text']).classes('text-caption text-grey-7')
                         jira_connection_detail = ui.label('').classes('text-caption text-grey-7')

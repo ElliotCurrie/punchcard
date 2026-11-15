@@ -88,7 +88,16 @@ def window_header(desktop, name: str, title: str, *, status: bool = False):
             'pywebview-drag-region flex-grow font-semibold tracking-widest '
             'text-blue-grey-9'
         ).tooltip('Drag to move window')
-        badge = ui.badge('Paused', color='grey') if status else None
+
+        badges = None
+        if status:
+            with ui.row().classes('items-center gap-1 no-wrap'):
+                # Display connectivity first, tracking second; retain the existing
+                # (tracking, connectivity) return contract for Widget.
+                connectivity_badge = ui.badge('Checking', color='grey')
+                tracking_badge = ui.badge('Paused', color='grey')
+                badges = (tracking_badge, connectivity_badge)
+
         if name != 'widget':
             ui.button(icon='remove', on_click=lambda: desktop.command('minimize', window=name)).props(
                 'flat dense round size=sm'
@@ -96,7 +105,7 @@ def window_header(desktop, name: str, title: str, *, status: bool = False):
         ui.button(icon='close', on_click=lambda: desktop.command('hide', window=name)).props(
             'flat dense round size=sm'
         ).tooltip('Close')
-    return badge
+    return badges
 
 
 @contextmanager

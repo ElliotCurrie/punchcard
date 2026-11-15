@@ -12,7 +12,7 @@ import requests
 from .database import Database
 from .settings import TEMPO_SERVICE
 from .events import EventHook
-from .connection_errors import network_error
+from .connectivity import network_error
 from .timestamps import local_datetime
 
 LOG = logging.getLogger(__name__)
@@ -217,6 +217,24 @@ class Tempo:
         cutoff = self.database.get_preference('tempo_sync_after')
         if not cutoff:
             return counts
+
+        # Verify Tempo is reachable before claiming or submitting worklogs.
+        try:
+            self.validate_connection(token, base_url)
+        except (ConnectionError, ValueError, PermissionError) as exc:
+            if self.settings.connection_status('tempo')['configured']:
+                self.settings.record_connection_check(
+                    'tempo', success=False, detail=str(exc),
+                )
+            counts['unavailable'] = True
+            self.on_change.emit(counts.copy())
+            return counts
+
+        if self.settings.connection_status('tempo')['state'] == 'connection_lost':
+            self.settings.record_connection_check(
+                'tempo', success=True, detail='Tempo API verified successfully.',
+            )
+
         client = self.http or requests.Session()
         headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
         processed = 0

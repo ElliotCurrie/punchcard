@@ -4,11 +4,12 @@ from nicegui import ui
 from .layout import window_layout, open_view, format_elapsed
 
 class Widget:
-    def __init__(self, desktop, tracker, jira, settings, *, on_toggle_tracking):
+    def __init__(self, desktop, tracker, jira, settings, connectivity, *, on_toggle_tracking):
         self.desktop = desktop
         self.tracker = tracker
         self.jira = jira
         self.settings = settings
+        self.connectivity = connectivity
         self.on_toggle_tracking = on_toggle_tracking
         self._revision = 0
 
@@ -20,14 +21,36 @@ class Widget:
         # Each NiceGUI route builds controls for its own browser connection.
         @ui.page('/')
         def render_widget():
-            with window_layout(self.desktop, 'widget', 'PUNCHCARD', padding=12, status=True) as status_badge:
+            with window_layout(
+                self.desktop, 'widget', 'PUNCHCARD', padding=12, status=True
+            ) as (status_badge, connectivity_badge):
+
+                connection_seen = {'status': None}
+
+                def refresh_connectivity_display():
+                    status = self.connectivity.status()
+                    if status == connection_seen['status']:
+                        return
+                    labels = {
+                        'online': ('Online', 'positive'),
+                        'offline': ('Offline', 'negative'),
+                        'limited': ('Limited', 'warning'),
+                        'checking': ('Checking', 'grey'),
+                        'not_configured': ('Not connected', 'grey'),
+                    }
+                    label, color = labels[status]
+                    connectivity_badge.set_text(label)
+                    connectivity_badge.props(f'color={color}')
+                    connection_seen['status'] = status
+
+                refresh_connectivity_display()
 
                 with ui.row().classes('w-full items-center justify-between'):
                     ui.label('Working on').classes('text-caption text-grey-7')
 
                     async def choose_issue():
                         # Use cached issues where possible; refresh when empty.
-                        if self.jira.list_tickets():
+                        if self.jira.list_tickets() or self.connectivity.status('jira') == 'offline':
                             open_view(self.desktop, 'tickets', reload=True)
                             return
 
@@ -38,12 +61,15 @@ class Widget:
                             assigned = sum(bool(t['assigned']) for t in issues)
                             if not assigned:
                                 ui.notify('No unfinished assigned issues found', type='warning')
-                            open_view(self.desktop, 'tickets', reload=True)
+                        except ConnectionError:
+                            ui.notify('Jira unavailable. Showing cached issues.', type='warning')
                         except Exception as exc:
                             ui.notify(f'Could not fetch Jira issues: {exc}', type='negative')
                         finally:
                             choose_button.props(remove='loading')
                             choose_button.enable()
+                        # A failed refresh must never prevent access to the offline picker.
+                        open_view(self.desktop, 'tickets', reload=True)
 
                     with ui.row().classes('w-full items-center no-wrap gap-2'):
                         choose_button = ui.button(
@@ -83,8 +109,7 @@ class Widget:
                         status_badge.props('color=positive' if active['kind'] == 'ticket' else 'color=orange')
                         details_label.set_text(active['title'][:60])
                     else:
-                        last = next((t for t in self.jira.list_tickets()
-                                     if t['issue_key'] == s['last_ticket']), None)
+                        last = self.jira.get_ticket(s['last_ticket']) if s['last_ticket'] else None
                         current_issue_label.set_text(
                             f"{last['issue_key']} · {last['title']}" if last else 'Select a Jira issue')
                         time_label.set_text('00:00:00')
@@ -158,4 +183,5 @@ class Widget:
 
                 ui.timer(0.25, refresh_if_changed)
                 ui.timer(1.0, refresh_tracking_display)  # Running clock
+                ui.timer(1.0, refresh_connectivity_display)
                 ui.timer(60.0, refresh_expiry_warning)

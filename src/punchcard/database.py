@@ -41,7 +41,9 @@ class Database:
                     issue_type_icon TEXT NOT NULL DEFAULT '',
                     status_category TEXT NOT NULL DEFAULT '',
                     visible INTEGER NOT NULL DEFAULT 1,
-                    jira_issue_id TEXT NOT NULL DEFAULT ''
+                    jira_issue_id TEXT NOT NULL DEFAULT '',
+                    browse_cached INTEGER NOT NULL DEFAULT 0,
+                    browse_scope TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +81,8 @@ class Database:
                 'status_category': "TEXT NOT NULL DEFAULT ''",
                 'visible': 'INTEGER NOT NULL DEFAULT 1',
                 'jira_issue_id': "TEXT NOT NULL DEFAULT ''",
+                'browse_cached': 'INTEGER NOT NULL DEFAULT 0',
+                'browse_scope': "TEXT NOT NULL DEFAULT ''",
             }.items():
                 if name not in existing:
                     db.execute(f'ALTER TABLE tickets ADD COLUMN {name} {declaration}')
@@ -91,6 +95,15 @@ class Database:
             # A killed process may have submitted a worklog just before it died.
             # Treat an interrupted submission as uncertain, never blindly POST it again.
             db.execute("UPDATE tempo_sync SET state='uncertain', error='Application interrupted during a Tempo request' WHERE state='sending'")
+            # On upgrading a database with existing Jira verification, pin its owner
+            # before a later credential change can discard the old identity.
+            owner = db.execute("SELECT value FROM preferences WHERE key='jira_owner_scope'").fetchone()
+            if not owner:
+                verified = db.execute("SELECT value FROM preferences WHERE key='jira_verified_identity'").fetchone()
+                account = db.execute("SELECT value FROM preferences WHERE key='jira_account_id'").fetchone()
+                if verified and verified['value'] and account and account['value']:
+                    db.execute("INSERT INTO preferences(key,value) VALUES('jira_owner_scope', ?)",
+                               (f"{verified['value']}|{account['value']}",))
 
     def set_change_callback(self, callback):
         """Register a post-commit notifier for sync-relevant activity changes."""
@@ -110,6 +123,37 @@ class Database:
         with self.connection() as db:
             row = db.execute('SELECT value FROM preferences WHERE key=?', (key,)).fetchone()
             return row['value'] if row else default
+
+    def has_jira_history(self) -> bool:
+        """A Jira identity cannot be changed while its session/worklog history exists."""
+        with self.connection() as db:
+            return bool(
+                db.execute('SELECT 1 FROM sessions WHERE ticket_key IS NOT NULL LIMIT 1').fetchone()
+                or db.execute('SELECT 1 FROM tempo_sync WHERE remote_id IS NOT NULL LIMIT 1').fetchone()
+            )
+
+    def invalidate_jira_authorization(self) -> None:
+        """Hide old selections on a credential change without deleting history."""
+        with self.connection() as db:
+            db.execute('UPDATE tickets SET visible=0, assigned=0')
+            for key in ('jira_account_id', 'jira_verified_identity', 'last_ticket', 'last_ticket_refresh'):
+                db.execute('DELETE FROM preferences WHERE key=?', (key,))
+
+    def record_verified_jira_identity(self, identity: str, account_id: str) -> None:
+        """Verify the active user and pin the owner of any historical worklogs."""
+        scope = f'{identity}|{account_id}'
+        with self.connection() as db:
+            owner = db.execute("SELECT value FROM preferences WHERE key='jira_owner_scope'").fetchone()
+            if owner and owner['value'] != scope:
+                history = (db.execute('SELECT 1 FROM sessions WHERE ticket_key IS NOT NULL LIMIT 1').fetchone()
+                           or db.execute('SELECT 1 FROM tempo_sync WHERE remote_id IS NOT NULL LIMIT 1').fetchone())
+                if history:
+                    raise ValueError('This PunchCard database contains Jira work history for a different '
+                                     'account. Use the original Jira identity or a separate PunchCard database.')
+            for key, value in (('jira_owner_scope', scope), ('jira_verified_identity', identity),
+                               ('jira_account_id', account_id)):
+                db.execute('INSERT INTO preferences(key,value) VALUES(?,?) '
+                           'ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, value))
 
     def save_tickets(self, tickets: list[dict]):
         now = utcnow()
@@ -138,10 +182,6 @@ class Database:
             db.execute('INSERT INTO preferences(key,value) VALUES(?,?) '
                        'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                        ('last_ticket_refresh', now))
-            account_id = next((t.get('account_id') for t in tickets if t.get('assigned') and t.get('account_id')), None)
-            if account_id:
-                db.execute("INSERT INTO preferences(key,value) VALUES('jira_account_id', ?) "
-                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (account_id,))
 
     def list_tickets(self) -> list[dict]:
         """Latest assigned issues and their parents, excluding stale cached issues."""
@@ -426,3 +466,100 @@ class Database:
             rows = db.execute("SELECT state,COUNT(*) AS n FROM tempo_sync GROUP BY state").fetchall()
             return {r['state']: r['n'] for r in rows}
 
+    def cache_browsed_issues(self, issues: list[dict], scope: str) -> None:
+        """Cache browsed issues without affecting the assigned-issue view."""
+        now = utcnow()
+
+        with self.connection() as db:
+            db.executemany("""
+                INSERT INTO tickets (
+                    issue_key, title, status, assigned, updated_at, parent_key,
+                    issue_type, issue_type_icon, status_category, visible,
+                    jira_issue_id, browse_cached, browse_scope
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, ?)
+                ON CONFLICT(issue_key) DO UPDATE SET
+                    title=excluded.title,
+                    status=excluded.status,
+                    assigned=excluded.assigned,
+                    updated_at=excluded.updated_at,
+                    parent_key=excluded.parent_key,
+                    issue_type=excluded.issue_type,
+                    issue_type_icon=excluded.issue_type_icon,
+                    status_category=excluded.status_category,
+                    jira_issue_id=excluded.jira_issue_id,
+                    browse_cached=1,
+                    browse_scope=excluded.browse_scope
+            """, [
+                (
+                    issue['key'], issue['title'], issue.get('status', ''),
+                    int(issue.get('assigned', False)), now, issue.get('parent_key'),
+                    issue.get('issue_type', 'Issue'), issue.get('issue_type_icon', ''),
+                    issue.get('status_category', ''),
+                    str(issue.get('jira_issue_id') or ''), scope,
+                )
+                for issue in issues
+            ])
+
+    def revoke_cached_browsed_issue(self, issue_key: str, scope: str) -> None:
+        """Stop offering an issue whose Jira access was explicitly denied."""
+        with self.connection() as db:
+            db.execute('UPDATE tickets SET browse_cached=0 WHERE issue_key=? AND browse_scope=?',
+                       (issue_key, scope))
+
+    def reconcile_cached_space(self, space_key: str, scope: str, issue_keys: set[str]) -> None:
+        """Expire absent cache entries only after a complete online space traversal.
+
+        Keep the ticket rows themselves for historical Tempo issue-ID joins.
+        """
+        with self.connection() as db:
+            rows = db.execute("""SELECT issue_key FROM tickets WHERE browse_cached=1
+                AND browse_scope=? AND substr(issue_key,1,length(?) + 1)=? || '-'
+            """, (scope, space_key, space_key)).fetchall()
+            db.executemany('UPDATE tickets SET browse_cached=0 WHERE issue_key=? AND browse_scope=?',
+                           [(row['issue_key'], scope) for row in rows
+                            if row['issue_key'] not in issue_keys])
+
+    def list_cached_browsed_issues(self, space_key: str, scope: str) -> list[dict]:
+        """Retrieve cached issues for the selected Jira account and space."""
+        with self.connection() as db:
+            rows = db.execute("""
+                SELECT issue_key, title, status, assigned, parent_key,
+                    issue_type, issue_type_icon, status_category, jira_issue_id
+                FROM tickets
+                WHERE browse_cached = 1
+                AND browse_scope = ?
+                AND substr(issue_key, 1, length(?) + 1) = ? || '-'
+                ORDER BY issue_key
+            """, (scope, space_key, space_key)).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def search_cached_browsed_issues(self, query: str, scope: str,
+                                     *, limit: int = 100) -> list[dict]:
+        """Search issues cached under the current verified Jira identity."""
+        escaped = (query.casefold().replace('!', '!!')
+                   .replace('%', '!%').replace('_', '!_'))
+        with self.connection() as db:
+            rows = db.execute("""
+                SELECT issue_key, title, status, assigned, parent_key,
+                       issue_type, issue_type_icon, status_category, jira_issue_id
+                FROM tickets
+                WHERE browse_cached = 1 AND browse_scope = ?
+                  AND (lower(issue_key) LIKE ? ESCAPE '!'
+                    OR lower(title) LIKE ? ESCAPE '!')
+                ORDER BY issue_key LIMIT ?
+            """, (scope, f'%{escaped}%', f'%{escaped}%', limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_cached_browsed_issue(self, issue_key: str, scope: str) -> dict | None:
+        """Retrieve a previously browsed issue within its original Jira identity."""
+        with self.connection() as db:
+            row = db.execute("""
+                SELECT issue_key, title, status, assigned, parent_key,
+                    issue_type, issue_type_icon, status_category, jira_issue_id
+                FROM tickets
+                WHERE issue_key = ? AND browse_cached = 1 AND browse_scope = ?
+            """, (issue_key, scope)).fetchone()
+
+        return dict(row) if row else None

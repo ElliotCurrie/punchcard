@@ -70,6 +70,15 @@ class Settings:
         self.on_change = EventHook("settings.changed")
         self._lock = threading.RLock()
         self.data = self.load()
+        # Pre-issue-3 databases stored the Jira account ID but not the verified
+        # site/account scope. Anchor historical worklogs before credentials can
+        # be changed or disconnected; this is not a new authentication check.
+        if self.database.has_jira_history() and not self.database.get_preference('jira_owner_scope'):
+            account = self.database.get_preference('jira_account_id')
+            url = self.data.get('jira_url', '').rstrip('/').casefold()
+            email = self.data.get('jira_email', '').casefold()
+            if account and url and email:
+                self.database.set_preference('jira_owner_scope', f'{url}|{email}|{account}')
 
     def load(self) -> dict:
         """Reload configuration to observe changes made by the active UI."""
@@ -183,8 +192,23 @@ class Settings:
         if (days is not None or chosen_date is not None) and not token and not self.vault.get_password(KEYRING_SERVICE, f'{url}|{email}'):
             raise ValueError('Save a Jira API token before setting its expiry')
         current = self.load()
-        identity_changed = ((current.get('jira_url', '').rstrip('/'),
-                             current.get('jira_email', '')) != (url, email))
+        original = (current.get('jira_url', '').rstrip('/'), current.get('jira_email', ''))
+        identity_changed = (original[0].casefold(), original[1].casefold()) != (url.casefold(), email.casefold())
+        if identity_changed and self.database.has_jira_history():
+            owner = self.database.get_preference('jira_owner_scope')
+            previous_identity = owner.rsplit('|', 1)[0] if owner else (
+                self.database.get_preference('jira_verified_identity') or
+                f'{original[0].casefold()}|{original[1].casefold()}')
+            if previous_identity != f'{url.casefold()}|{email.casefold()}':
+                raise ValueError('This PunchCard database contains work history for a different Jira '
+                                 'identity. Reconnect the original account or use a separate database.')
+        # Replacing credentials invalidates prior verification and the visible
+        # ticket selection. Tempo worklogs stay preserved, but their transport
+        # is blocked until Jira verifies the same account again.
+        if token or identity_changed:
+            self.database.invalidate_jira_authorization()
+            if identity_changed:
+                current['tempo_sync_enabled'] = False
         if token:
             self.vault.set_password(KEYRING_SERVICE, f'{url}|{email}', token)
         if (current.get('jira_url', '').rstrip('/'), current.get('jira_email', '')) != (url, email):
@@ -216,7 +240,7 @@ class Settings:
                     'jira_connection_detail', 'jira_connection_checked_at', 'tempo_account_id'):
             current.pop(key, None)
         current.update({'jira_url': '', 'jira_email': '', 'tempo_sync_enabled': False})
-        self.database.set_preference('jira_account_id', '')
+        self.database.invalidate_jira_authorization()
         self.save(current)
         self.database.notify_change()
 
@@ -363,11 +387,16 @@ class Settings:
         return current.get('tempo_api_url', 'https://api.tempo.io').rstrip('/'), token
 
     def get_tempo_credentials(self) -> tuple[str, str, str]:
-        """Sync also requires an Atlassian account to attribute worklogs to."""
+        """Sync writes require the same verified Jira identity as the local history."""
         base_url, token = self.get_tempo_api_credentials()
-        account_id = self.database.get_preference('jira_account_id') or self.load().get('tempo_account_id')
-        if not account_id:
-            raise ValueError('Tempo needs your Jira account ID; reconnect Jira first')
+        current = self.load()
+        identity = (f"{current.get('jira_url', '').rstrip('/').casefold()}|"
+                    f"{current.get('jira_email', '').casefold()}")
+        account_id = self.database.get_preference('jira_account_id')
+        verified = self.database.get_preference('jira_verified_identity')
+        owner = self.database.get_preference('jira_owner_scope')
+        if not account_id or verified != identity or (owner and owner != f'{identity}|{account_id}'):
+            raise ValueError('Verify the original Jira account before synchronising Tempo worklogs')
         return base_url, token, account_id
 
 
